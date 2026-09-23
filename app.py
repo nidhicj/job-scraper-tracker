@@ -16,6 +16,11 @@ app = Flask(__name__)
 CORS(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
+# Optional: point the openai client at an OpenAI-compatible provider
+# (e.g. OpenRouter's https://openrouter.ai/api/v1) instead of api.openai.com.
+if config.get("OpenAI_Base_URL"):
+    openai.api_base = config["OpenAI_Base_URL"]
+
 def read_pdf(file_path):
     try:
         text = extract_text(file_path)
@@ -167,7 +172,7 @@ def get_resume(job_id):
 
     try:
         completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model=config["OpenAI_Model"],
             messages=[
                 {"role": "user", "content": user_prompt},
             ],
