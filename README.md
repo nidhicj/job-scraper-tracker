@@ -15,6 +15,26 @@ If you spent any amount of time looking for jobs on LinkedIn you know how frustr
 
 If you are using this application, please be aware that LinkedIn does not allow scraping of its website. Use this application at your own risk. It's recommended to use proxy servers to avoid getting blocked by LinkedIn (more on proxy servers below).
 
+### Job Sources
+
+As of this update, the scraper can pull from multiple sources, controlled by `job_sources` in `config.json`:
+
+```json
+"job_sources": {
+  "linkedin": false,
+  "remoteok": true,
+  "arbeitnow": true,
+  "greenhouse_boards": ["stripe", "robinhood"],
+  "lever_boards": ["leverdemo"]
+}
+```
+
+- `remoteok` / `arbeitnow` — public, unauthenticated JSON APIs. No proxy needed, no LinkedIn ToS risk, and they support keyword-based filtering the same way LinkedIn results do (via `title_include`/`title_exclude`/`desc_words`/`company_exclude`). Enabled by default.
+- `greenhouse_boards` / `lever_boards` — lists of company board tokens (the slug in that company's careers URL, e.g. `boards.greenhouse.io/robinhood` → `"robinhood"`, or `jobs.lever.co/leverdemo` → `"leverdemo"`). Public per-company job boards, no auth. Add companies you specifically want to track.
+- `linkedin` — the original scraper described above. Off by default; LinkedIn's guest search endpoint is still there and works the same way, but it's a ToS violation and needs a proxy to be safe, so it's opt-in.
+
+All sources feed into the same filtering, deduplication, SQLite storage, and AI resume/cover-letter pipeline — nothing else about the app changes based on where a job came from.
+
 ### Prerequisites
 
 - Python 3.6 or higher
@@ -69,7 +89,8 @@ The `config.json` file contains the configuration options for the scraper and th
 - `proxies`: The proxy settings for the requests library. Set the `http` and `https` keys with the appropriate proxy URLs.
 - `headers`: The headers to be sent with the requests. Set the `User-Agent` key with a valid user agent string. If you don't know your user agen, google "my user agent" and it will show it.
 - `OpenAI_API_KEY`: Your OpenAI API key. You can get it from your OpenAI dashboard.
-- `OpenAI_Model`: The name of the OpenAI model to use for cover letter generation. GPT-4 family of models produces best results, but also the most expensive one.
+- `OpenAI_Model`: The name of the OpenAI model to use for cover letter and resume generation. GPT-4 family of models produces best results, but also the most expensive one.
+- `OpenAI_Base_URL`: Optional. Leave empty to use OpenAI's own API. Set to the base URL of any OpenAI-compatible provider (e.g. `https://openrouter.ai/api/v1` for OpenRouter) to route requests there instead — use that provider's API key in `OpenAI_API_KEY` and one of its model names in `OpenAI_Model`.
 - `resume_path`: Local path to your resume in PDF format (only PDF is supported at this time). For best results it's advised that your PDF resume is formatted in a way that's easy for the AI to parse. Use a single column format, avoid images. You may get unpredictable results if it's in a two-column format.
 - `search_queries`: An array of search query objects, each containing the following keys:
   - `keywords`: The keywords to search for in the job title.

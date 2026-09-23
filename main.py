@@ -91,6 +91,138 @@ def transform_job(soup):
     else:
         return "Could not find Job Description"
 
+def normalize_date(value):
+    # Convert a date value from any job source (ISO string, unix seconds, unix ms) into 'YYYY-MM-DD'
+    if not value:
+        return ''
+    if isinstance(value, (int, float)):
+        ts = value / 1000 if value > 1e12 else value
+        return datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d')
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).strftime('%Y-%m-%d')
+    except ValueError:
+        return str(value)[:10]
+
+def html_to_text(html):
+    if not html:
+        return ''
+    return BeautifulSoup(html, 'html.parser').get_text(separator='\n').strip()
+
+def make_job(title, company, location, date_value, job_url, job_description=''):
+    return {
+        'title': title,
+        'company': company,
+        'location': location,
+        'date': normalize_date(date_value),
+        'job_url': job_url,
+        'job_description': job_description,
+        'applied': 0,
+        'hidden': 0,
+        'interview': 0,
+        'rejected': 0
+    }
+
+def get_remoteok_jobs(config):
+    # Public, unauthenticated JSON feed - no proxy or LinkedIn ToS risk
+    headers = dict(config.get('headers', {}))
+    headers.setdefault('User-Agent', 'Mozilla/5.0')
+    jobs = []
+    try:
+        r = requests.get('https://remoteok.com/api', headers=headers, timeout=10)
+        data = r.json()
+    except Exception as e:
+        print(f"An error occurred while fetching RemoteOK jobs: {e}")
+        return jobs
+    for item in data:
+        if not isinstance(item, dict) or not item.get('position'):
+            continue
+        jobs.append(make_job(
+            title=item.get('position', ''),
+            company=item.get('company', ''),
+            location=item.get('location') or 'Remote',
+            date_value=item.get('date'),
+            job_url=item.get('url', ''),
+            job_description=html_to_text(item.get('description'))
+        ))
+    print(f"RemoteOK: fetched {len(jobs)} jobs")
+    return jobs
+
+def get_arbeitnow_jobs(config):
+    # Public, unauthenticated, paginated JSON feed
+    jobs = []
+    url = 'https://www.arbeitnow.com/api/job-board-api'
+    pages_fetched = 0
+    max_pages = config.get('pages_to_scrape', 1)
+    while url and pages_fetched < max_pages:
+        try:
+            r = requests.get(url, timeout=10)
+            data = r.json()
+        except Exception as e:
+            print(f"An error occurred while fetching Arbeitnow jobs: {e}")
+            break
+        for item in data.get('data', []):
+            jobs.append(make_job(
+                title=item.get('title', ''),
+                company=item.get('company_name', ''),
+                location=item.get('location', ''),
+                date_value=item.get('created_at'),
+                job_url=item.get('url', ''),
+                job_description=html_to_text(item.get('description'))
+            ))
+        url = data.get('links', {}).get('next')
+        pages_fetched += 1
+    print(f"Arbeitnow: fetched {len(jobs)} jobs")
+    return jobs
+
+def get_greenhouse_jobs(board_token, config):
+    # Public, unauthenticated per-company board. board_token = the company's Greenhouse board slug
+    jobs = []
+    try:
+        r = requests.get(f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs', timeout=10)
+        listing = r.json().get('jobs', [])
+    except Exception as e:
+        print(f"An error occurred while fetching Greenhouse jobs for {board_token}: {e}")
+        return jobs
+    for item in listing:
+        description = ''
+        try:
+            job_id = item.get('id')
+            rd = requests.get(f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs/{job_id}?content=true', timeout=10)
+            description = html_to_text(rd.json().get('content', ''))
+        except Exception as e:
+            print(f"Could not fetch description for Greenhouse job {item.get('id')}: {e}")
+        jobs.append(make_job(
+            title=item.get('title', ''),
+            company=item.get('company_name') or board_token,
+            location=(item.get('location') or {}).get('name', ''),
+            date_value=item.get('first_published'),
+            job_url=item.get('absolute_url', ''),
+            job_description=description
+        ))
+    print(f"Greenhouse ({board_token}): fetched {len(jobs)} jobs")
+    return jobs
+
+def get_lever_jobs(board_token, config):
+    # Public, unauthenticated per-company board. board_token = the company's Lever slug
+    jobs = []
+    try:
+        r = requests.get(f'https://api.lever.co/v0/postings/{board_token}?mode=json', timeout=10)
+        listing = r.json()
+    except Exception as e:
+        print(f"An error occurred while fetching Lever jobs for {board_token}: {e}")
+        return jobs
+    for item in listing:
+        jobs.append(make_job(
+            title=item.get('text', ''),
+            company=board_token,
+            location=(item.get('categories') or {}).get('location', ''),
+            date_value=item.get('createdAt'),
+            job_url=item.get('hostedUrl', ''),
+            job_description=item.get('descriptionPlain') or html_to_text(item.get('description'))
+        ))
+    print(f"Lever ({board_token}): fetched {len(jobs)} jobs")
+    return jobs
+
 def safe_detect(text):
     try:
         return detect(text)
@@ -156,6 +288,7 @@ def create_table(conn, df, table_name):
         'float64': 'REAL',
         'datetime64[ns]': 'TIMESTAMP',
         'object': 'TEXT',
+        'str': 'TEXT',  # pandas >= 3.0 reports pure-string columns as 'str', not 'object'
         'bool': 'INTEGER'
     }
     
@@ -224,18 +357,34 @@ def job_exists(df, job):
     return ((df['job_url'] == job['job_url']).any() | (((df['title'] == job['title']) & (df['company'] == job['company']) & (df['date'] == job['date'])).any()))
 
 def get_jobcards(config):
-    #Function to get the job cards from the search results page
+    #Function to get the job cards, from whichever sources are enabled in config['job_sources']
     all_jobs = []
-    for k in range(0, config['rounds']):
-        for query in config['search_queries']:
-            keywords = quote(query['keywords']) # URL encode the keywords
-            location = quote(query['location']) # URL encode the location
-            for i in range (0, config['pages_to_scrape']):
-                url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={keywords}&location={location}&f_TPR=&f_WT={query['f_WT']}&geoId=&f_TPR={config['timespan']}&start={25*i}"
-                soup = get_with_retry(url, config)
-                jobs = transform(soup)
-                all_jobs = all_jobs + jobs
-                print("Finished scraping page: ", url)
+    sources = config.get('job_sources', {})
+
+    if sources.get('linkedin'):
+        for k in range(0, config['rounds']):
+            for query in config['search_queries']:
+                keywords = quote(query['keywords']) # URL encode the keywords
+                location = quote(query['location']) # URL encode the location
+                for i in range (0, config['pages_to_scrape']):
+                    url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={keywords}&location={location}&f_TPR=&f_WT={query['f_WT']}&geoId=&f_TPR={config['timespan']}&start={25*i}"
+                    soup = get_with_retry(url, config)
+                    jobs = transform(soup)
+                    all_jobs = all_jobs + jobs
+                    print("Finished scraping page: ", url)
+
+    if sources.get('remoteok'):
+        all_jobs += get_remoteok_jobs(config)
+
+    if sources.get('arbeitnow'):
+        all_jobs += get_arbeitnow_jobs(config)
+
+    for board_token in sources.get('greenhouse_boards', []):
+        all_jobs += get_greenhouse_jobs(board_token, config)
+
+    for board_token in sources.get('lever_boards', []):
+        all_jobs += get_lever_jobs(board_token, config)
+
     print ("Total job cards scraped: ", len(all_jobs))
     all_jobs = remove_duplicates(all_jobs, config)
     print ("Total job cards after removing duplicates: ", len(all_jobs))
@@ -283,8 +432,11 @@ def main(config_file):
             if job_date < datetime.now() - timedelta(days=config['days_to_scrape']):
                 continue
             print('Found new job: ', job['title'], 'at ', job['company'], job['job_url'])
-            desc_soup = get_with_retry(job['job_url'], config)
-            job['job_description'] = transform_job(desc_soup)
+            if not job['job_description']:
+                # Only LinkedIn jobs land here with no description yet - other sources
+                # (RemoteOK, Arbeitnow, Greenhouse, Lever) already fill it in at fetch time.
+                desc_soup = get_with_retry(job['job_url'], config)
+                job['job_description'] = transform_job(desc_soup)
             language = safe_detect(job['job_description'])
             if language not in config['languages']:
                 print('Job description language not supported: ', language)

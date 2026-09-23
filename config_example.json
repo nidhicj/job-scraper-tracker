@@ -8,9 +8,18 @@
 
   "OpenAI_API_KEY": "",
   "OpenAI_Model": "",
+  "OpenAI_Base_URL": "",
   "resume_path": "full local path to your resume in PDF format",
 
-  "search_queries": [    
+  "job_sources": {
+    "linkedin": false,
+    "remoteok": true,
+    "arbeitnow": true,
+    "greenhouse_boards": ["stripe", "robinhood"],
+    "lever_boards": ["leverdemo"]
+  },
+
+  "search_queries": [
     {"keywords": "Python developer", "location": "Los Angeles", "f_WT": ""},
     {"keywords": "Python developer", "location": "USA", "f_WT": "2"}
 
@@ -24,7 +33,7 @@
   "title_include": ["python", "developer", "backend", "BE", "engineer"],
   "company_exclude": ["ClickJobs.io"],
   "languages": ["en"],
-  "timespan": "r84600",
+  "timespan": "r86400",
   "jobs_tablename": "jobs",
   "filtered_jobs_tablename": "filtered_jobs",
   "db_path": "./data/my_database.db",
