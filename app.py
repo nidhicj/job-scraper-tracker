@@ -81,51 +81,47 @@ def job_details(job_id):
     else:
         return jsonify({"error": "Job not found"}), 404
 
-@app.route('/hide_job/<int:job_id>', methods=['POST'])
-def hide_job(job_id):
+def toggle_column(job_id, column):
+    """Flip a 0/1 status column for a job and return the new value."""
     conn = sqlite3.connect(config["db_path"])
     cursor = conn.cursor()
-    cursor.execute("UPDATE jobs SET hidden = 1 WHERE id = ?", (job_id,))
+    cursor.execute(f"UPDATE jobs SET {column} = 1 - {column} WHERE id = ?", (job_id,))
     conn.commit()
+    cursor.execute(f"SELECT {column} FROM jobs WHERE id = ?", (job_id,))
+    new_value = cursor.fetchone()[0]
     conn.close()
-    return jsonify({"success": "Job marked as hidden"}), 200
+    return new_value
+
+@app.route('/hide_job/<int:job_id>', methods=['POST'])
+def hide_job(job_id):
+    new_value = toggle_column(job_id, "hidden")
+    return jsonify({"success": True, "hidden": bool(new_value)}), 200
 
 
 @app.route('/mark_applied/<int:job_id>', methods=['POST'])
 def mark_applied(job_id):
-    print("Applied clicked!")
-    conn = sqlite3.connect(config["db_path"])
-    cursor = conn.cursor()
-    query = "UPDATE jobs SET applied = 1 WHERE id = ?"
-    print(f'Executing query: {query} with job_id: {job_id}')  # Log the query
-    cursor.execute(query, (job_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"success": "Job marked as applied"}), 200
+    new_value = toggle_column(job_id, "applied")
+    return jsonify({"success": True, "applied": bool(new_value)}), 200
 
 @app.route('/mark_interview/<int:job_id>', methods=['POST'])
 def mark_interview(job_id):
-    print("Interview clicked!")
-    conn = sqlite3.connect(config["db_path"])
-    cursor = conn.cursor()
-    query = "UPDATE jobs SET interview = 1 WHERE id = ?"
-    print(f'Executing query: {query} with job_id: {job_id}')
-    cursor.execute(query, (job_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"success": "Job marked as interview"}), 200
+    new_value = toggle_column(job_id, "interview")
+    return jsonify({"success": True, "interview": bool(new_value)}), 200
 
 @app.route('/mark_rejected/<int:job_id>', methods=['POST'])
 def mark_rejected(job_id):
-    print("Rejected clicked!")
+    new_value = toggle_column(job_id, "rejected")
+    return jsonify({"success": True, "rejected": bool(new_value)}), 200
+
+@app.route('/delete_job/<int:job_id>', methods=['POST'])
+def delete_job(job_id):
     conn = sqlite3.connect(config["db_path"])
     cursor = conn.cursor()
-    query = "UPDATE jobs SET rejected = 1 WHERE id = ?"
-    print(f'Executing query: {query} with job_id: {job_id}')
-    cursor.execute(query, (job_id,))
+    cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
     conn.commit()
+    deleted = cursor.rowcount > 0
     conn.close()
-    return jsonify({"success": "Job marked as rejected"}), 200
+    return jsonify({"success": deleted}), (200 if deleted else 404)
 
 @app.route('/get_cover_letter/<int:job_id>')
 def get_cover_letter(job_id):
@@ -280,4 +276,4 @@ def verify_db_schema():
 
 if __name__ == "__main__":
     verify_db_schema()  # Verify the DB schema before running the app
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5099)

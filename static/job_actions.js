@@ -44,14 +44,15 @@ function updateJobDetails(job) {
     var jobDetailsDiv = document.getElementById('job-details');
     var coverLetterDiv = document.getElementById('bottom-pane'); // Get the cover letter div
     console.log('Updating job details: ' + job.id); // Log the jobId here
-    var html = '<h2 class="job-title">' + job.title + '</h2>';
+    var html = '<h2 class="job-title">#' + job.id + ' - ' + job.title + '</h2>';
     html += '<div class="button-container" style="text-align:center">';
     html += '<a href="' + job.job_url + '" class="job-button">Go to job</a>';
     html += '<button class="job-button" onclick="markAsCoverLetter(' + job.id + ')">Cover Letter</button>';
-    html += '<button class="job-button" onclick="markAsApplied(' + job.id + ')">Applied</button>';
-    html += '<button class="job-button" onclick="markAsRejected(' + job.id + ')">Rejected</button>';
-    html += '<button class="job-button" onclick="markAsInterview(' + job.id + ')">Interview</button>';
-    html += '<button class="job-button" onclick="hideJob(' + job.id + ')">Hide</button>';
+    html += '<button class="job-button' + (job.applied == 1 ? ' active' : '') + '" onclick="markAsApplied(' + job.id + ', this)">Applied</button>';
+    html += '<button class="job-button' + (job.rejected == 1 ? ' active' : '') + '" onclick="markAsRejected(' + job.id + ', this)">Rejected</button>';
+    html += '<button class="job-button' + (job.interview == 1 ? ' active' : '') + '" onclick="markAsInterview(' + job.id + ', this)">Interview</button>';
+    html += '<button class="job-button' + (job.hidden == 1 ? ' active' : '') + '" onclick="hideJob(' + job.id + ', this)">Hide</button>';
+    html += '<button class="job-button danger" onclick="deleteJob(' + job.id + ')">Delete</button>';
     html += '</div>';
     html += '<p class="job-detail">' + job.company + ', ' + job.location + '</p>';
     html += '<p class="job-detail">' + job.date + '</p>';
@@ -68,17 +69,31 @@ function updateJobDetails(job) {
 }
 
 
-function markAsApplied(jobId) {
-    console.log('Marking job as applied: ' + jobId)
-    fetch('/mark_applied/' + jobId, { method: 'POST' })
+// Shared toggle logic for the four status buttons (applied/rejected/interview/hidden).
+// endpoint returns the NEW boolean state after flipping it server-side; this function
+// reflects that state in both the button (active class) and the job-list card
+// (job-item-<field> highlight), instead of always just adding the class.
+function toggleStatus(jobId, endpoint, field, cardClass, buttonEl) {
+    return fetch('/' + endpoint + '/' + jobId, { method: 'POST' })
         .then(response => response.json())
         .then(data => {
-            console.log(data);  // Log the response
-            if (data.success) {
-                var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
-                jobCard.classList.add('job-item-applied');
+            console.log(data);
+            if (!data.success) return data;
+            var isOn = data[field];
+            var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
+            if (jobCard && cardClass) {
+                jobCard.classList.toggle(cardClass, isOn);
             }
+            if (buttonEl) {
+                buttonEl.classList.toggle('active', isOn);
+            }
+            return data;
         });
+}
+
+function markAsApplied(jobId, buttonEl) {
+    console.log('Toggling applied: ' + jobId);
+    toggleStatus(jobId, 'mark_applied', 'applied', 'job-item-applied', buttonEl);
 }
 
 function markAsCoverLetter(jobId) {
@@ -94,62 +109,73 @@ function markAsCoverLetter(jobId) {
         });
 }
 
-function markAsRejected(jobId) {
-    console.log('Marking job as rejected: ' + jobId)
-    fetch('/mark_rejected/' + jobId, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            console.log(data);  // Log the response
-            if (data.success) {
-                var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
-                jobCard.classList.add('job-item-rejected');
-            }
-        });
+function markAsRejected(jobId, buttonEl) {
+    console.log('Toggling rejected: ' + jobId);
+    toggleStatus(jobId, 'mark_rejected', 'rejected', 'job-item-rejected', buttonEl);
 }
 
-function hideJob(jobId) {
+function findNextJobCard(jobCard) {
+    var nextJobCard = jobCard.nextElementSibling;
+    while (nextJobCard && !nextJobCard.classList.contains('job-item')) {
+        nextJobCard = nextJobCard.nextElementSibling;
+    }
+    return nextJobCard;
+}
+
+function advancePastCard(jobCard) {
+    var nextJobCard = findNextJobCard(jobCard);
+    if (nextJobCard) {
+        showJobDetails(nextJobCard.getAttribute('data-job-id'));
+    } else {
+        document.getElementById('job-details').innerHTML = '';
+    }
+    return nextJobCard;
+}
+
+function hideJob(jobId, buttonEl) {
+    console.log('Toggling hidden: ' + jobId);
     fetch('/hide_job/' + jobId, { method: 'POST' })
         .then(response => response.json())
         .then(data => {
-            if (data.success) {
-                var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
-                
-                // Find the next sibling in the DOM that is a job-item
-                var nextJobCard = jobCard.nextElementSibling;
-                while(nextJobCard && !nextJobCard.classList.contains('job-item')) {
-                    nextJobCard = nextJobCard.nextElementSibling;
-                }
-                
-                // If a next job exists, show its details
-                if (nextJobCard) {
-                    var nextJobId = nextJobCard.getAttribute('data-job-id');
-                    showJobDetails(nextJobId);
-                }
-                
-                // Hide the current job
-                jobCard.style.display = 'none'; // Or you can remove it from DOM entirely
-
-                // If no next job exists, clear the job details div
-                if (!nextJobCard) {
-                    var jobDetailsDiv = document.getElementById('job-details');
-                    jobDetailsDiv.innerHTML = '';
-                }
+            if (!data.success) return;
+            if (buttonEl) {
+                buttonEl.classList.toggle('active', data.hidden);
+            }
+            var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
+            if (data.hidden) {
+                // Newly hidden: leave the view entirely, same as before.
+                advancePastCard(jobCard);
+                jobCard.style.display = 'none';
+            } else {
+                // Toggled back to visible (only reachable if something re-shows a
+                // hidden job's details) - just clear the "hidden" look.
+                jobCard.style.display = '';
             }
         });
 }
 
-
-function markAsInterview(jobId) {
-    console.log('Marking job as interview: ' + jobId)
-    fetch('/mark_interview/' + jobId, { method: 'POST' })
+function deleteJob(jobId) {
+    if (!confirm('Delete job #' + jobId + ' permanently? This removes it from the database and cannot be undone.')) {
+        return;
+    }
+    console.log('Deleting job: ' + jobId);
+    fetch('/delete_job/' + jobId, { method: 'POST' })
         .then(response => response.json())
         .then(data => {
-            console.log(data);  // Log the response
-            if (data.success) {
-                var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
-                jobCard.classList.add('job-item-interview');
+            if (!data.success) {
+                alert('Could not delete job #' + jobId + '.');
+                return;
             }
+            var jobCard = document.querySelector(`.job-item[data-job-id="${jobId}"]`);
+            advancePastCard(jobCard);
+            jobCard.remove(); // actually gone from the DOM, not just hidden
         });
+}
+
+
+function markAsInterview(jobId, buttonEl) {
+    console.log('Toggling interview: ' + jobId);
+    toggleStatus(jobId, 'mark_interview', 'interview', 'job-item-interview', buttonEl);
 }
 
 var resizer = document.getElementById('resizer');

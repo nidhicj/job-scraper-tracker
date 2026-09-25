@@ -15,3 +15,6 @@ indeed.py
 SupabaseUpload/
 CLAUDE-generalChat-bulletPoint.md
 PREFLIGHT-generalChat-bulletPoint.md
+.env
+static/job_actions_orig.js
+.playwright-mcp/
