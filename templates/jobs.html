@@ -10,6 +10,56 @@
             body {
                 font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             }
+            .top-nav {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 12px;
+            }
+            .top-nav a {
+                padding: 8px 18px;
+                border-radius: 5px;
+                text-decoration: none;
+                color: #1a7431;
+                font-weight: 600;
+                background-color: #eef7ee;
+            }
+            .top-nav a.current {
+                background-color: #4CAF50;
+                color: white;
+            }
+            .list-controls {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                margin-bottom: 12px;
+                font-size: 14px;
+                color: #555;
+            }
+            .list-controls select {
+                font-family: inherit;
+                font-size: 14px;
+                padding: 4px 6px;
+                border-radius: 5px;
+                border: 1px solid #ccc;
+            }
+            .job-meta {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 13px;
+                color: #555;
+                margin-top: 4px !important;
+            }
+            .source-badge {
+                display: inline-block;
+                padding: 1px 8px;
+                border-radius: 10px;
+                font-size: 12px;
+                font-weight: 600;
+                background-color: #e3e7ee;
+                color: #33415c;
+            }
             .row {
                 display: flex;
             }
@@ -151,23 +201,39 @@
         </style>
     </head>
     <body>
+        <nav class="top-nav">
+            <a href="/" class="current">Jobs</a>
+            <a href="/applications">Applications</a>
+        </nav>
         <div class="row">
             <div class="column">
                 <!-- Display the list of jobs -->
                 <h2>Jobs List</h2>
-                
+                <div class="list-controls">
+                    <span>{{ jobs|length }} jobs</span>
+                    <label>Sort
+                        <select id="sort-jobs" onchange="sortJobs(this.value)">
+                            <option value="posted-desc">Posted: newest first</option>
+                            <option value="posted-asc">Posted: oldest first</option>
+                            <option value="added-desc">Recently scraped</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="job-list">
                 {% for job in jobs %}
-                <a class="{% if job.rejected == 1 %}job-item job-item-rejected{% elif job.interview == 1 %}job-item job-item-interview{% elif job.applied == 1 %}job-item job-item-applied{% else %}job-item{% endif %}"  href="#" onclick="event.preventDefault(); showJobDetails('{{ job.id }}')" data-job-id="{{ job.id }}">
+                <a class="{% if job.rejected == 1 %}job-item job-item-rejected{% elif job.interview == 1 %}job-item job-item-interview{% elif job.applied == 1 %}job-item job-item-applied{% else %}job-item{% endif %}"  href="#" onclick="event.preventDefault(); showJobDetails('{{ job.id }}')" data-job-id="{{ job.id }}" data-date="{{ job.date or '' }}">
                     <div class="job-row">
                         <div class="job-id-badge">#{{ job.id }}</div>
                         <div class="job-content">
                             <h3>{{ job.title }}</h3>
                             <p>{{ job.company }}, {{ job.location }}</p>
-                            <p>{{ job.date }}</p>
+                            <p class="job-meta"><span class="source-badge">{{ job.source or 'Other' }}</span><span>{{ job.date }}</span></p>
                         </div>
                     </div>
                 </a>
                 {% endfor %}
+                </div>
             </div>
             <div class="column">
                 <!-- Placeholder for job details -->

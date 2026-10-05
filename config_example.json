@@ -15,9 +15,11 @@
     "linkedin": false,
     "remoteok": true,
     "arbeitnow": true,
+    "xing": true,
     "greenhouse_boards": ["stripe", "robinhood"],
     "lever_boards": ["leverdemo"]
   },
+  "xing": {"max_pages": 50, "delay_seconds": 2},
 
   "search_queries": [
     {"keywords": "Python developer", "location": "Los Angeles", "f_WT": ""},

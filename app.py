@@ -5,6 +5,8 @@ import json
 import openai
 from pdfminer.high_level import extract_text
 from flask_cors import CORS
+from datetime import datetime
+from db_schema import ensure_schema
 
 def load_config(file_name):
     # Load the config file
@@ -49,6 +51,40 @@ def read_pdf(file_path):
 def home():
     jobs = read_jobs_from_db()
     return render_template('jobs.html', jobs=jobs)
+
+@app.route('/applications')
+def applications():
+    # Every job with any application status set, including hidden ones - hiding a job
+    # you applied to shouldn't drop it from the tally.
+    conn = sqlite3.connect(config["db_path"])
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, title, company, location, date, job_url, source, applied_date, interview, rejected "
+        "FROM jobs WHERE applied = 1 OR interview = 1 OR rejected = 1"
+    ).fetchall()
+    total_scraped = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    hidden = conn.execute("SELECT COUNT(*) FROM jobs WHERE hidden = 1").fetchone()[0]
+    conn.close()
+
+    apps = []
+    for row in rows:
+        app_row = dict(row)
+        # A rejection after an interview is still a rejection, so it wins
+        app_row['outcome'] = 'Rejected' if row['rejected'] == 1 else 'Interview' if row['interview'] == 1 else 'Waiting'
+        apps.append(app_row)
+    # Most recently applied first; applications from before applied_date existed go last, newest id first
+    apps.sort(key=lambda a: (a['applied_date'] or '', a['id']), reverse=True)
+
+    counts = {
+        'applied': len(apps),
+        'waiting': sum(a['outcome'] == 'Waiting' for a in apps),
+        'interview': sum(a['outcome'] == 'Interview' for a in apps),
+        'rejected': sum(a['outcome'] == 'Rejected' for a in apps),
+        'total_scraped': total_scraped,
+        'hidden': hidden,
+    }
+    sources = sorted({a['source'] or 'Other' for a in apps})
+    return render_template('applications.html', apps=apps, counts=counts, sources=sources)
 
 @app.route('/job/<int:job_id>')
 def job(job_id):
@@ -101,7 +137,13 @@ def hide_job(job_id):
 @app.route('/mark_applied/<int:job_id>', methods=['POST'])
 def mark_applied(job_id):
     new_value = toggle_column(job_id, "applied")
-    return jsonify({"success": True, "applied": bool(new_value)}), 200
+    # Stamp when it was switched on; clear it if the click was undone
+    applied_date = datetime.now().strftime('%Y-%m-%d') if new_value else None
+    conn = sqlite3.connect(config["db_path"])
+    conn.execute("UPDATE jobs SET applied_date = ? WHERE id = ?", (applied_date, job_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "applied": bool(new_value), "applied_date": applied_date}), 200
 
 @app.route('/mark_interview/<int:job_id>', methods=['POST'])
 def mark_interview(job_id):
@@ -112,6 +154,26 @@ def mark_interview(job_id):
 def mark_rejected(job_id):
     new_value = toggle_column(job_id, "rejected")
     return jsonify({"success": True, "rejected": bool(new_value)}), 200
+
+@app.route('/set_outcome/<int:job_id>/<outcome>', methods=['POST'])
+def set_outcome(job_id, outcome):
+    # Sets the flags behind the Applications page outcome directly, rather than toggling.
+    # Rejected leaves the interview flag alone so an interview that ended in rejection keeps its history.
+    # applied stays 1 so the job can't drop off the Applications page.
+    updates = {
+        'Waiting': "interview = 0, rejected = 0",
+        'Interview': "interview = 1, rejected = 0",
+        'Rejected': "rejected = 1",
+    }
+    if outcome not in updates:
+        return jsonify({"success": False, "error": "Unknown outcome"}), 400
+    conn = sqlite3.connect(config["db_path"])
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE jobs SET applied = 1, {updates[outcome]} WHERE id = ?", (job_id,))
+    conn.commit()
+    updated = cursor.rowcount > 0
+    conn.close()
+    return jsonify({"success": updated, "outcome": outcome}), (200 if updated else 404)
 
 @app.route('/delete_job/<int:job_id>', methods=['POST'])
 def delete_job(job_id):
@@ -254,25 +316,8 @@ def read_jobs_from_db():
     return df.to_dict('records')
 
 def verify_db_schema():
-    conn = sqlite3.connect(config["db_path"])
-    cursor = conn.cursor()
-
-    # Get the table information
-    cursor.execute("PRAGMA table_info(jobs)")
-    table_info = cursor.fetchall()
-
-    # Check if the "cover_letter" column exists
-    if "cover_letter" not in [column[1] for column in table_info]:
-        # If it doesn't exist, add it
-        cursor.execute("ALTER TABLE jobs ADD COLUMN cover_letter TEXT")
-        print("Added cover_letter column to jobs table")
-
-    if "resume" not in [column[1] for column in table_info]:
-        # If it doesn't exist, add it
-        cursor.execute("ALTER TABLE jobs ADD COLUMN resume TEXT")
-        print("Added resume column to jobs table")
-
-    conn.close()
+    # Adds cover_letter/resume/source/applied_date columns if missing and backfills source
+    ensure_schema(config["db_path"])
 
 if __name__ == "__main__":
     verify_db_schema()  # Verify the DB schema before running the app

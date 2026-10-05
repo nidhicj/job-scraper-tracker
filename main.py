@@ -1,5 +1,8 @@
 import requests
 import json
+import re
+import gzip
+import html
 import sqlite3
 import sys
 from sqlite3 import Error
@@ -11,6 +14,7 @@ import pandas as pd
 from urllib.parse import quote
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
+from db_schema import ensure_schema
 
 
 def load_config(file_name):
@@ -65,7 +69,8 @@ def transform(soup):
             'applied': 0,
             'hidden': 0,
             'interview': 0,
-            'rejected': 0
+            'rejected': 0,
+            'source': 'LinkedIn'
         }
         joblist.append(job)
     return joblist
@@ -108,7 +113,7 @@ def html_to_text(html):
         return ''
     return BeautifulSoup(html, 'html.parser').get_text(separator='\n').strip()
 
-def make_job(title, company, location, date_value, job_url, job_description=''):
+def make_job(title, company, location, date_value, job_url, job_description='', source=''):
     return {
         'title': title,
         'company': company,
@@ -119,7 +124,8 @@ def make_job(title, company, location, date_value, job_url, job_description=''):
         'applied': 0,
         'hidden': 0,
         'interview': 0,
-        'rejected': 0
+        'rejected': 0,
+        'source': source
     }
 
 def get_remoteok_jobs(config):
@@ -142,7 +148,8 @@ def get_remoteok_jobs(config):
             location=item.get('location') or 'Remote',
             date_value=item.get('date'),
             job_url=item.get('url', ''),
-            job_description=html_to_text(item.get('description'))
+            job_description=html_to_text(item.get('description')),
+            source='RemoteOK'
         ))
     print(f"RemoteOK: fetched {len(jobs)} jobs")
     return jobs
@@ -167,7 +174,8 @@ def get_arbeitnow_jobs(config):
                 location=item.get('location', ''),
                 date_value=item.get('created_at'),
                 job_url=item.get('url', ''),
-                job_description=html_to_text(item.get('description'))
+                job_description=html_to_text(item.get('description')),
+                source='Arbeitnow'
             ))
         url = data.get('links', {}).get('next')
         pages_fetched += 1
@@ -197,7 +205,8 @@ def get_greenhouse_jobs(board_token, config):
             location=(item.get('location') or {}).get('name', ''),
             date_value=item.get('first_published'),
             job_url=item.get('absolute_url', ''),
-            job_description=description
+            job_description=description,
+            source='Greenhouse'
         ))
     print(f"Greenhouse ({board_token}): fetched {len(jobs)} jobs")
     return jobs
@@ -218,9 +227,128 @@ def get_lever_jobs(board_token, config):
             location=(item.get('categories') or {}).get('location', ''),
             date_value=item.get('createdAt'),
             job_url=item.get('hostedUrl', ''),
-            job_description=item.get('descriptionPlain') or html_to_text(item.get('description'))
+            job_description=item.get('descriptionPlain') or html_to_text(item.get('description')),
+            source='Lever'
         ))
     print(f"Lever ({board_token}): fetched {len(jobs)} jobs")
+    return jobs
+
+def slug_matches(slug_tokens, phrases):
+    # True if any phrase (e.g. 'machine learning', 'ai/ml') appears as consecutive whole words in the URL slug.
+    # Whole-word matching matters: a plain substring check would match 'llm' inside 'vellmar'.
+    for phrase in phrases:
+        words = re.split(r'[^a-z0-9]+', phrase.lower())
+        words = [w for w in words if w]
+        if not words:
+            continue
+        for i in range(len(slug_tokens) - len(words) + 1):
+            if slug_tokens[i:i + len(words)] == words:
+                return True
+    return False
+
+def find_jobposting(data):
+    # JSON-LD can be one object, a list of objects, or an @graph; @type can be a string or a list
+    if isinstance(data, list):
+        for item in data:
+            found = find_jobposting(item)
+            if found:
+                return found
+        return None
+    if not isinstance(data, dict):
+        return None
+    types = data.get('@type')
+    if types == 'JobPosting' or (isinstance(types, list) and 'JobPosting' in types):
+        return data
+    return find_jobposting(data.get('@graph', []))
+
+def parse_jobposting_page(job_url, headers, source):
+    # Fetch any job page and build a job from its schema.org JobPosting JSON-LD (None if absent).
+    # Most job boards and applicant-tracking systems (XING, Personio, Join, ...) embed it for Google Jobs.
+    r = requests.get(job_url, headers=headers, timeout=15)
+    soup = BeautifulSoup(r.content, 'html.parser')
+    posting = None
+    for tag in soup.find_all('script', type='application/ld+json'):
+        try:
+            posting = find_jobposting(json.loads(tag.string or '{}'))
+        except ValueError:
+            continue
+        if posting:
+            break
+    if posting is None:
+        return None
+    places = posting.get('jobLocation') or []
+    if isinstance(places, dict):
+        places = [places]
+    location = ', '.join(dict.fromkeys(
+        (p.get('address') or {}).get('addressLocality') or '' for p in places if isinstance(p, dict))).strip(', ')
+    if posting.get('jobLocationType') == 'TELECOMMUTE':
+        location = (location + ' (Remote)').strip()
+    company = posting.get('hiringOrganization') or ''
+    if isinstance(company, dict):
+        company = company.get('name', '')
+    description = posting.get('description') or ''
+    if '&lt;' in description:
+        description = html.unescape(description)  # some sites HTML-escape the description twice
+    return make_job(
+        title=posting.get('title', ''),
+        company=company,
+        location=location,
+        date_value=posting.get('datePosted'),
+        job_url=job_url,
+        job_description=html_to_text(description),
+        source=source
+    )
+
+def get_xing_jobs(config):
+    # XING has no public jobs API. Its robots.txt allows the job sitemaps and individual job pages
+    # (only /jobs/search is disallowed), so: sitemap -> keyword match on the URL slug -> fetch the
+    # page -> read the schema.org JobPosting JSON-LD embedded in it.
+    headers = dict(config.get('headers', {}))
+    headers.setdefault('User-Agent', 'Mozilla/5.0')
+    xing_config = config.get('xing', {})
+    max_pages = xing_config.get('max_pages', 50)
+    delay = xing_config.get('delay_seconds', 2)
+    jobs = []
+
+    try:
+        r = requests.get('https://www.xing.com/jobs/sitemap.xml.gz', headers=headers, timeout=30)
+        sitemap_urls = re.findall(r'<loc>([^<]+)</loc>', gzip.decompress(r.content).decode('utf-8'))
+    except Exception as e:
+        print(f"An error occurred while fetching the XING sitemap index: {e}")
+        return jobs
+
+    # Collect matching job URLs across all sitemap chunks (~50K URLs each)
+    candidates = {}
+    for sitemap_url in sitemap_urls:
+        try:
+            r = requests.get(sitemap_url, headers=headers, timeout=30)
+            job_urls = re.findall(r'<loc>([^<]+)</loc>', gzip.decompress(r.content).decode('utf-8'))
+        except Exception as e:
+            print(f"Could not fetch XING sitemap {sitemap_url}: {e}")
+            continue
+        for job_url in job_urls:
+            slug = job_url.rstrip('/').rsplit('/', 1)[-1].lower()
+            tokens = slug.split('-')
+            if not tokens[-1].isdigit():
+                continue
+            if slug_matches(tokens, config.get('title_include', [])) and not slug_matches(tokens, config.get('title_exclude', [])):
+                candidates[int(tokens[-1])] = job_url
+        tm.sleep(delay)
+    print(f"XING: {len(candidates)} job URLs match title_include in the sitemap")
+
+    # XING job ids grow over time, so the highest ids are the newest postings
+    for job_id in sorted(candidates, reverse=True)[:max_pages]:
+        job_url = candidates[job_id]
+        try:
+            job = parse_jobposting_page(job_url, headers, 'XING')
+            if job:
+                jobs.append(job)
+            else:
+                print(f"No JobPosting data found on {job_url}")
+        except Exception as e:
+            print(f"Could not fetch XING job {job_url}: {e}")
+        tm.sleep(delay)
+    print(f"XING: fetched {len(jobs)} jobs")
     return jobs
 
 def safe_detect(text):
@@ -379,6 +507,9 @@ def get_jobcards(config):
     if sources.get('arbeitnow'):
         all_jobs += get_arbeitnow_jobs(config)
 
+    if sources.get('xing'):
+        all_jobs += get_xing_jobs(config)
+
     for board_token in sources.get('greenhouse_boards', []):
         all_jobs += get_greenhouse_jobs(board_token, config)
 
@@ -414,6 +545,7 @@ def main(config_file):
     job_list = []
 
     config = load_config(config_file)
+    ensure_schema(config['db_path'])  # add source/applied_date columns so new rows can be appended
     jobs_tablename = config['jobs_tablename'] # name of the table to store the "approved" jobs
     filtered_jobs_tablename = config['filtered_jobs_tablename'] # name of the table to store the jobs that have been filtered out based on description keywords (so that in future they are not scraped again)
     #Scrape search results page and get job cards. This step might take a while based on the number of pages and search queries.

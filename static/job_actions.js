@@ -55,7 +55,7 @@ function updateJobDetails(job) {
     html += '<button class="job-button danger" onclick="deleteJob(' + job.id + ')">Delete</button>';
     html += '</div>';
     html += '<p class="job-detail">' + job.company + ', ' + job.location + '</p>';
-    html += '<p class="job-detail">' + job.date + '</p>';
+    html += '<p class="job-detail">Posted ' + job.date + ' · Source: ' + (job.source || 'Other') + '</p>';
     html += '<p class="job-description">' + job.job_description + '</p>';
 
     jobDetailsDiv.innerHTML = html;
@@ -201,3 +201,31 @@ function stopDrag() {
     document.removeEventListener('mousemove', drag);
     document.removeEventListener('mouseup', stopDrag);
 }
+
+// Reorder the job cards in place. Dates are 'YYYY-MM-DD', so plain string comparison sorts them;
+// ties (and jobs with no date) fall back to id, newest scraped first.
+function sortJobs(mode) {
+    var list = document.getElementById('job-list');
+    if (!list) return;
+    var cards = Array.from(list.querySelectorAll('.job-item'));
+    cards.sort(function(a, b) {
+        var idDiff = Number(b.dataset.jobId) - Number(a.dataset.jobId);
+        if (mode === 'added-desc') return idDiff;
+        var da = a.dataset.date || '', db = b.dataset.date || '';
+        if (da === db) return idDiff;
+        if (!da) return 1;  // undated jobs always at the bottom
+        if (!db) return -1;
+        return mode === 'posted-asc' ? (da < db ? -1 : 1) : (da < db ? 1 : -1);
+    });
+    cards.forEach(function(card) { list.appendChild(card); });
+    try { localStorage.setItem('jobSort', mode); } catch (e) {}
+}
+
+(function restoreSort() {
+    var select = document.getElementById('sort-jobs');
+    if (!select) return;
+    var mode = 'posted-desc';
+    try { mode = localStorage.getItem('jobSort') || mode; } catch (e) {}
+    select.value = mode;
+    sortJobs(mode);
+})();
