@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 import re
 import gzip
 import html
@@ -15,12 +16,34 @@ from urllib.parse import quote
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 from db_schema import ensure_schema
+from dotenv import load_dotenv
 
+
+# .env variable -> config.json key it overrides. Secrets and model choice live in .env (git-ignored);
+# config.json keeps the rest. See .env_example.
+ENV_OVERRIDES = {
+    'OPENAI_API_KEY': ('OpenAI_API_KEY',),
+    'OPENAI_MODEL': ('OpenAI_Model',),
+    'OPENAI_BASE_URL': ('OpenAI_Base_URL',),
+    'VISION_MODEL': ('Vision_Model',),
+    'EMAIL_ALERTS_USERNAME': ('email_alerts', 'username'),
+    'EMAIL_ALERTS_APP_PASSWORD': ('email_alerts', 'app_password'),
+}
 
 def load_config(file_name):
-    # Load the config file
+    # Load the config file, then let any values set in .env take precedence
+    load_dotenv()
     with open(file_name) as f:
-        return json.load(f)
+        config = json.load(f)
+    for env_name, path in ENV_OVERRIDES.items():
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        target = config
+        for key in path[:-1]:
+            target = target.setdefault(key, {})
+        target[path[-1]] = value
+    return config
 
 def get_with_retry(url, config, retries=3, delay=1):
     # Get the URL with retries and delay
@@ -265,7 +288,11 @@ def parse_jobposting_page(job_url, headers, source):
     # Fetch any job page and build a job from its schema.org JobPosting JSON-LD (None if absent).
     # Most job boards and applicant-tracking systems (XING, Personio, Join, ...) embed it for Google Jobs.
     r = requests.get(job_url, headers=headers, timeout=15)
-    soup = BeautifulSoup(r.content, 'html.parser')
+    return job_from_jobposting_html(r.content, job_url, source)
+
+def job_from_jobposting_html(page_html, job_url, source):
+    # Build a job from the JobPosting JSON-LD in already-fetched page HTML (None if absent)
+    soup = BeautifulSoup(page_html, 'html.parser')
     posting = None
     for tag in soup.find_all('script', type='application/ld+json'):
         try:

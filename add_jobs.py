@@ -84,12 +84,19 @@ def fetch_job(url, headers):
     return job
 
 def save_job(conn, job):
-    # Returns (id, is_new). A job counts as saved already if its URL or title+company match.
+    # Returns (id, is_new). A job counts as saved already if its URL or title+company match
+    # (case-insensitive, since titles read off a screenshot or email won't always match exactly).
+    # An empty URL never matches, otherwise every URL-less job would collide.
     row = conn.execute(
-        "SELECT id FROM jobs WHERE job_url = ? OR (title = ? AND company = ?)",
-        (job['job_url'], job['title'], job['company'])
+        "SELECT id, job_description FROM jobs WHERE (job_url = ? AND ? != '') "
+        "OR (lower(trim(title)) = lower(trim(?)) AND lower(trim(company)) = lower(trim(?)))",
+        (job['job_url'], job['job_url'], job['title'], job['company'])
     ).fetchone()
     if row:
+        # A job saved from an email alert has no description yet - fill it in when a fuller copy arrives
+        if not (row[1] or '').strip() and job['job_description'].strip():
+            conn.execute("UPDATE jobs SET job_description = ? WHERE id = ?", (job['job_description'], row[0]))
+            conn.commit()
         return row[0], False
     job = dict(job, date_loaded=str(datetime.now()))
     columns = ', '.join(f'"{c}"' for c in job)

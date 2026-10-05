@@ -9,6 +9,7 @@
   "OpenAI_API_KEY": "",
   "OpenAI_Model": "",
   "OpenAI_Base_URL": "",
+  "Vision_Model": "optional: a model that can read images, for screenshots (defaults to OpenAI_Model)",
   "resume_path": "full local path to your resume in PDF format",
 
   "job_sources": {
@@ -20,6 +21,16 @@
     "lever_boards": ["leverdemo"]
   },
   "xing": {"max_pages": 50, "delay_seconds": 2},
+
+  "email_alerts": {
+    "imap_host": "imap.gmail.com",
+    "username": "you@gmail.com (or EMAIL_ALERTS_USERNAME in .env)",
+    "app_password": "better in .env as EMAIL_ALERTS_APP_PASSWORD",
+    "folder": "INBOX",
+    "days": 2,
+    "senders": ["jobalerts-noreply@linkedin.com", "stepstone", "indeed", "glassdoor",
+                "nationalevacaturebank", "intermediair", "wellfound", "xing", "monster"]
+  },
 
   "search_queries": [
     {"keywords": "Python developer", "location": "Los Angeles", "f_WT": ""},

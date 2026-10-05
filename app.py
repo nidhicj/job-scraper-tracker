@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import pandas as pd
 import sqlite3
 import json
@@ -7,16 +7,16 @@ from pdfminer.high_level import extract_text
 from flask_cors import CORS
 from datetime import datetime
 from db_schema import ensure_schema
-
-def load_config(file_name):
-    # Load the config file
-    with open(file_name) as f:
-        return json.load(f)
+import job_intake
+from main import load_config
 
 config = load_config('config.json')
 app = Flask(__name__)
 CORS(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+# Room for screenshots and for the full page text the bookmarklet sends (Flask's form default is 500 KB)
+app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
+app.config['MAX_FORM_MEMORY_SIZE'] = 10 * 1024 * 1024
 
 # Optional: point the openai client at an OpenAI-compatible provider
 # (e.g. OpenRouter's https://openrouter.ai/api/v1) instead of api.openai.com.
@@ -85,6 +85,63 @@ def applications():
     }
     sources = sorted({a['source'] or 'Other' for a in apps})
     return render_template('applications.html', apps=apps, counts=counts, sources=sources)
+
+@app.route('/add_job')
+def add_job_page():
+    return render_template('add_job.html')
+
+@app.route('/add_job', methods=['POST'])
+def add_job():
+    # A screenshot or pasted text wins over the link; the link is then just stored as the job's URL.
+    url = request.form.get('url', '').strip()
+    text = request.form.get('text', '').strip()
+    screenshot = request.files.get('screenshot')
+    try:
+        if screenshot and screenshot.filename:
+            job = job_intake.job_from_screenshot(config, screenshot.read(), screenshot.mimetype or 'image/png', url)
+        elif text:
+            job = job_intake.job_from_text(config, text, url)
+        elif url:
+            try:
+                job = job_intake.job_from_link(config, url)
+            except Exception as e:
+                return jsonify({"success": False, "needs_more": True, "error":
+                                f"Couldn't read that page ({e}). Many boards block automated access - "
+                                "keep the link in the box and add a screenshot or paste the job text."}), 422
+        else:
+            return jsonify({"success": False, "error": "Give a link, a screenshot, or the job text."}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify(store_job(job, request.form.get('applied') == 'on')), 200
+
+@app.route('/capture', methods=['POST'])
+def capture():
+    # Target of the "Save to tracker" bookmarklet: the page the user is looking at, as their browser loaded it
+    url = request.form.get('url', '')
+    try:
+        ld_scripts = json.loads(request.form.get('ld') or '[]')
+        job = job_intake.job_from_capture(config, url, ld_scripts, request.form.get('text', ''))
+        result = store_job(job, False)
+    except Exception as e:
+        result = {"success": False, "error": str(e), "url": url}
+    return render_template('capture_result.html', result=result)
+
+@app.route('/set_applied/<int:job_id>', methods=['POST'])
+def set_applied(job_id):
+    conn = sqlite3.connect(config["db_path"])
+    job_intake.mark_applied(conn, job_id)
+    conn.close()
+    return jsonify({"success": True}), 200
+
+def store_job(job, applied):
+    conn = sqlite3.connect(config["db_path"])
+    job_id, is_new = job_intake.save_job(conn, job)
+    if applied:
+        job_intake.mark_applied(conn, job_id)
+    conn.close()
+    return {"success": True, "id": job_id, "is_new": is_new, "applied": applied, "title": job['title'],
+            "company": job['company'], "location": job['location'], "source": job['source'],
+            "has_description": bool(job['job_description'].strip())}
 
 @app.route('/job/<int:job_id>')
 def job(job_id):
