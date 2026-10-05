@@ -96,21 +96,29 @@ def add_job():
     url = request.form.get('url', '').strip()
     text = request.form.get('text', '').strip()
     screenshot = request.files.get('screenshot')
+    has_shot = bool(screenshot and screenshot.filename)
+    print(f"[add_job] screenshot={'yes' if has_shot else 'no'} text={len(text)} chars "
+          f"url={url or '-'} applied={request.form.get('applied') == 'on'}")
     try:
-        if screenshot and screenshot.filename:
+        if has_shot:
+            print(f"[add_job] reading screenshot with {config.get('Vision_Model') or config.get('OpenAI_Model')}")
             job = job_intake.job_from_screenshot(config, screenshot.read(), screenshot.mimetype or 'image/png', url)
         elif text:
+            print(f"[add_job] reading pasted text with {config.get('OpenAI_Model')}")
             job = job_intake.job_from_text(config, text, url)
         elif url:
+            print("[add_job] fetching link")
             try:
                 job = job_intake.job_from_link(config, url)
             except Exception as e:
+                print(f"[add_job] link failed: {e} - asked for a screenshot or text")
                 return jsonify({"success": False, "needs_more": True, "error":
                                 f"Couldn't read that page ({e}). Many boards block automated access - "
                                 "keep the link in the box and add a screenshot or paste the job text."}), 422
         else:
             return jsonify({"success": False, "error": "Give a link, a screenshot, or the job text."}), 400
     except Exception as e:
+        print(f"[add_job] FAILED: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
     return jsonify(store_job(job, request.form.get('applied') == 'on')), 200
 
@@ -120,9 +128,11 @@ def capture():
     url = request.form.get('url', '')
     try:
         ld_scripts = json.loads(request.form.get('ld') or '[]')
+        print(f"[bookmark] {url} - {len(ld_scripts)} JSON-LD blocks, {len(request.form.get('text', ''))} chars of page text")
         job = job_intake.job_from_capture(config, url, ld_scripts, request.form.get('text', ''))
         result = store_job(job, False)
     except Exception as e:
+        print(f"[bookmark] FAILED: {e}")
         result = {"success": False, "error": str(e), "url": url}
     return render_template('capture_result.html', result=result)
 
@@ -131,6 +141,7 @@ def set_applied(job_id):
     conn = sqlite3.connect(config["db_path"])
     job_intake.mark_applied(conn, job_id)
     conn.close()
+    print(f"[set_applied] #{job_id} marked as applied")
     return jsonify({"success": True}), 200
 
 def store_job(job, applied):
@@ -139,6 +150,10 @@ def store_job(job, applied):
     if applied:
         job_intake.mark_applied(conn, job_id)
     conn.close()
+    description = job['job_description'].strip()
+    print(f"[save_job] {'ADDED' if is_new else 'EXISTS'} #{job_id} [{job['source']}] {job['title']} - {job['company']}"
+          f" ({job['location'] or 'no location'}) | description: {len(description)} chars"
+          f"{' | marked applied' if applied else ''}")
     return {"success": True, "id": job_id, "is_new": is_new, "applied": applied, "title": job['title'],
             "company": job['company'], "location": job['location'], "source": job['source'],
             "has_description": bool(job['job_description'].strip())}

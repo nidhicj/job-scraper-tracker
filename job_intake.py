@@ -91,7 +91,9 @@ def job_from_capture(config, url, ld_scripts, page_text):
     page_html = ''.join(f'<script type="application/ld+json">{s}</script>' for s in ld_scripts)
     job = job_from_jobposting_html(page_html, clean_url(url), source_from_url(url)) if page_html else None
     if job and job['title']:
+        print("[bookmark] read the page's JobPosting data")
         return job
+    print(f"[bookmark] no JobPosting data on the page - reading its text with {config.get('OpenAI_Model')}")
     return job_from_text(config, page_text, url)
 
 def mark_applied(conn, job_id):
