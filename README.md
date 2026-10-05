@@ -1,131 +1,425 @@
-# UPDATE August 2023.
+# Job Scraper & Application Tracker
 
-New version includes OpenAI integration for cover letter generation. See below for how to configure config.json file.
+A personal, self-hosted job-hunting tool. It **collects job postings** from several job boards into one local SQLite database, **filters out the noise** with your own keyword rules, and gives you a small **web app** to read postings, track your applications, and generate an AI-tailored resume or cover letter for any job.
 
-## LinkedIn Job Scraper
+Everything runs on your own machine. Your data stays in a local SQLite file.
 
-This is a Python application that scrapes job postings from LinkedIn and stores them in a SQLite database. The application also provides a web interface to view the job postings and mark them as applied, rejected,interview, and hidden.
-![Screenshot image](./screenshot/screenshot1.png)
+![Jobs page](./screenshot/screenshot1.png)
 
-### Problem
+---
 
-If you spent any amount of time looking for jobs on LinkedIn you know how frustrating it is. The same job postings keep showing up in your search results, and you have to scroll through pages and pages of irrelevant job postings to find the ones that are relevant to you, only to see the ones you applied for weeks ago. This application aims to solve this problem by scraping job postings from LinkedIn and storing them in a SQLite database. You can filter out job postings based on keywords in Title and Description (tired of seeing Clinical QA Manager when you search for software QA jobs? Just filter out jobs that have "clinical" in the title). The jobs are sorted by date posted, not by what LinkedIn thinks is relevant to you. No sponsored job posts. No duplicate job posts. No irrelevant job posts. Just the jobs you want to see.
+## Table of contents
 
-### IMPORTANT NOTE
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+- [How it fits together](#how-it-fits-together)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+  - [Secrets in `.env`](#secrets-in-env)
+  - [`config.json` reference](#configjson-reference)
+- [Getting jobs in](#getting-jobs-in)
+  - [1. Scraper (`main.py`)](#1-scraper-mainpy)
+  - [2. Hand-picked links (`add_jobs.py`)](#2-hand-picked-links-add_jobspy)
+  - [3. Add job page (link / screenshot / pasted text)](#3-add-job-page-link--screenshot--pasted-text)
+  - [4. "Save to tracker" bookmarklet](#4-save-to-tracker-bookmarklet)
+  - [5. Job-alert emails (`email_alerts.py`)](#5-job-alert-emails-email_alertspy)
+- [Using the web app](#using-the-web-app)
+- [Database](#database)
+- [Running it on a schedule](#running-it-on-a-schedule)
+- [Project layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
+- [Legal & ethics](#legal--ethics)
+- [Roadmap](#roadmap)
+- [License](#license)
 
-If you are using this application, please be aware that LinkedIn does not allow scraping of its website. Use this application at your own risk. It's recommended to use proxy servers to avoid getting blocked by LinkedIn (more on proxy servers below).
+---
 
-### Job Sources
+## Why this exists
 
-As of this update, the scraper can pull from multiple sources, controlled by `job_sources` in `config.json`:
+Job boards show you the same postings again and again, mix in sponsored and irrelevant results, and sort by what *they* think is relevant. This tool:
+
+- pulls from many sources into **one list, newest first**;
+- **removes duplicates** (same title + company, or same URL) across sources and across runs;
+- **drops irrelevant jobs** by title, description, company, and language, using rules you write once;
+- **remembers** what you've applied to, interviewed for, been rejected from, or hidden.
+
+---
+
+## Features
+
+| Area | What you get |
+|---|---|
+| **Sources** | RemoteOK, Arbeitnow, XING, any company's Greenhouse or Lever board, and (opt-in) LinkedIn |
+| **Filtering** | Include/exclude title words, exclude description words, exclude companies, keep only chosen languages, max posting age |
+| **Manual intake** | Add a job from a link, a **screenshot** (read by a vision model), or pasted text |
+| **Browser bookmarklet** | One click on any job page saves it, even on sites that block scrapers |
+| **Email alerts** | Reads LinkedIn/StepStone/Indeed/Glassdoor/... alert emails from Gmail and saves the jobs in them |
+| **Tracking** | Applied / Interview / Rejected / Hidden flags, applied date, Applications dashboard with tallies |
+| **AI writing** | Tailored resume and two-pass cover letter per job, using any OpenAI-compatible API (OpenAI, OpenRouter, ...) |
+
+---
+
+## How it fits together
+
+```
+                ┌───────────────────────── sources ─────────────────────────┐
+  main.py  ───► │ RemoteOK · Arbeitnow · XING · Greenhouse · Lever · LinkedIn │
+                └─────────────────────────────┬─────────────────────────────┘
+                                              │ dedupe + keyword/language filters
+  add_jobs.py ───── links ──────────┐         ▼
+  email_alerts.py ─ Gmail alerts ───┼──►  SQLite (data/my_database.db)
+  Add job page / bookmarklet ───────┘      ├─ jobs            (kept)
+                                           ├─ filtered_jobs   (rejected by filters, so they aren't re-scraped)
+                                           └─ processed_emails
+                                              │
+                                              ▼
+                                  app.py  (Flask, http://127.0.0.1:5099)
+                                  Jobs · Applications · Add job · AI resume / cover letter
+```
+
+---
+
+## Quick start
+
+**Requirements:** Python 3.9+ and `pip`. (An OpenAI-compatible API key is only needed for the AI features, screenshots, pasted text, and email alerts.)
+
+```bash
+# 1. Get the code and create a virtual environment
+git clone <this-repo-url>
+cd LinkedIn_Scraper
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Create your config files from the examples
+cp config_example.json config.json
+cp .env_example .env              # then fill in your keys
+mkdir -p data                     # the SQLite file lives here
+
+# 4. Edit config.json: your search words, filters, and sources (see below)
+
+# 5. Run the scraper once to create and fill the database
+python main.py
+
+# 6. Start the web app
+python app.py
+```
+
+Then open **http://127.0.0.1:5099**.
+
+> Run `main.py` **before** `app.py` the first time. The scraper is what creates the `jobs` table.
+
+`config.json`, `.env`, the database, and the CSV exports are all git-ignored, so your keys and job data never get committed.
+
+---
+
+## Configuration
+
+Settings live in two files:
+
+- **`.env`**: secrets and model choice. Never committed.
+- **`config.json`**: everything else (sources, filters, paths). Also never committed; `config_example.json` is the template.
+
+Any value set in `.env` **overrides** the matching value in `config.json`.
+
+### Secrets in `.env`
+
+```dotenv
+# Any OpenAI-compatible provider. This example uses OpenRouter.
+OPENAI_API_KEY=sk-or-v1-...
+OPENAI_MODEL=openai/gpt-4o-mini
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+
+# Optional: a model that can read images (for screenshots). Defaults to OPENAI_MODEL.
+VISION_MODEL=openai/gpt-4o-mini
+
+# Gmail job alerts. Use a 16-character app password from
+# https://myaccount.google.com/apppasswords, NOT your normal Gmail password.
+EMAIL_ALERTS_USERNAME=you@gmail.com
+EMAIL_ALERTS_APP_PASSWORD=abcdefghijklmnop
+```
+
+Format: `NAME=value`, no quotes, no spaces around `=`. Leave a line out to fall back to `config.json`.
+
+| `.env` variable | Overrides `config.json` key |
+|---|---|
+| `OPENAI_API_KEY` | `OpenAI_API_KEY` |
+| `OPENAI_MODEL` | `OpenAI_Model` |
+| `OPENAI_BASE_URL` | `OpenAI_Base_URL` |
+| `VISION_MODEL` | `Vision_Model` |
+| `EMAIL_ALERTS_USERNAME` | `email_alerts.username` |
+| `EMAIL_ALERTS_APP_PASSWORD` | `email_alerts.app_password` |
+
+To use OpenAI directly, leave `OPENAI_BASE_URL` empty and use an OpenAI model name such as `gpt-4o-mini`.
+
+### `config.json` reference
+
+#### Sources
 
 ```json
 "job_sources": {
   "linkedin": false,
   "remoteok": true,
   "arbeitnow": true,
+  "xing": true,
   "greenhouse_boards": ["stripe", "robinhood"],
   "lever_boards": ["leverdemo"]
-}
+},
+"xing": { "max_pages": 50, "delay_seconds": 2 }
 ```
 
-- `remoteok` / `arbeitnow` — public, unauthenticated JSON APIs. No proxy needed, no LinkedIn ToS risk, and they support keyword-based filtering the same way LinkedIn results do (via `title_include`/`title_exclude`/`desc_words`/`company_exclude`). Enabled by default.
-- `greenhouse_boards` / `lever_boards` — lists of company board tokens (the slug in that company's careers URL, e.g. `boards.greenhouse.io/robinhood` → `"robinhood"`, or `jobs.lever.co/leverdemo` → `"leverdemo"`). Public per-company job boards, no auth. Add companies you specifically want to track.
-- `linkedin` — the original scraper described above. Off by default; LinkedIn's guest search endpoint is still there and works the same way, but it's a ToS violation and needs a proxy to be safe, so it's opt-in.
+| Key | What it does |
+|---|---|
+| `remoteok` | Public RemoteOK JSON feed (remote jobs worldwide). No auth, no proxy. |
+| `arbeitnow` | Public Arbeitnow feed (mostly Germany/EU). Paginated; reads up to `pages_to_scrape` pages. |
+| `xing` | XING has no public API. The scraper reads XING's job **sitemap**, keeps URLs whose slug matches `title_include` (and not `title_exclude`), then reads the structured job data on each page. Only the sitemap and job pages are fetched, both allowed by XING's `robots.txt`. |
+| `xing.max_pages` | Max XING job pages to fetch per run (newest first). |
+| `xing.delay_seconds` | Pause between XING requests. Keep it polite. |
+| `greenhouse_boards` | Company slugs from `boards.greenhouse.io/<slug>`. |
+| `lever_boards` | Company slugs from `jobs.lever.co/<slug>`. |
+| `linkedin` | The original LinkedIn guest-search scraper. **Off by default.** It goes against LinkedIn's terms and needs a proxy to avoid blocks. See [Legal & ethics](#legal--ethics). |
 
-All sources feed into the same filtering, deduplication, SQLite storage, and AI resume/cover-letter pipeline — nothing else about the app changes based on where a job came from.
+All sources go through the same deduplication and filters.
 
-### Prerequisites
+#### Filters
 
-- Python 3.6 or higher
-- Flask
-- Requests
-- BeautifulSoup
-- Pandas
-- SQLite3
-- Pysocks
+| Key | Type | Meaning |
+|---|---|---|
+| `title_include` | list | Keep a job **only if** its title contains at least one of these words. Empty list = no title requirement. |
+| `title_exclude` | list | Drop a job if its title contains **any** of these words. |
+| `desc_words` | list | Drop a job if its description contains **any** of these words/phrases. |
+| `company_exclude` | list | Drop jobs from companies whose name contains any of these. |
+| `languages` | list | Keep only descriptions in these languages (auto-detected), e.g. `["en"]`, `["en", "de"]`. Empty = any language. |
+| `days_to_scrape` | int | Ignore postings older than this many days. |
 
-### Installation
+All matches are case-insensitive substring matches. Short words can over-match: `"BE"` in `title_include` also matches "Be**be**rt" or "Mem**be**r". Prefer full words.
 
-1. Clone the repository to your local machine.
-2. Install the required packages using pip: `pip install -r requirements.txt`
-3. Create a `config.json` file in the root directory of the project. See the `config.json` section below for details on the configuration options. Config_example.json is provided as an example, feel free to use it as a template.
-4. Run the scraper using the command `python main.py`. Note: run this first first to populate the database with job postings prior to running app.py.
-4. Run the application using the command `python app.py`.
-5. Open a web browser and navigate to `http://127.0.0.1:5000` to view the job postings.
+#### LinkedIn-only settings
 
-### Usage
+Only used when `job_sources.linkedin` is `true`.
 
-The application consists of two main components: the scraper and the web interface.
+| Key | Meaning |
+|---|---|
+| `search_queries` | List of `{ "keywords": "...", "location": "...", "f_WT": "" }`. `f_WT`: `0` onsite, `1` hybrid, `2` remote, `""` any. |
+| `timespan` | Posting age filter: `"r"` + seconds. `r86400` = 24 h, `r604800` = 7 days. |
+| `pages_to_scrape` | Result pages per query (25 jobs each). Also caps Arbeitnow pages. |
+| `rounds` | Run every query this many times. LinkedIn returns slightly different results each time. |
+| `proxies` | `requests`-style proxy dict, e.g. `{"http": "socks5://...", "https": "socks5://..."}`. Test it with `python tests/test_proxy_connection.py`. |
+| `headers` | Extra HTTP headers, mainly `User-Agent`. |
 
-#### Scraper
+#### Storage, AI, and email
 
-The scraper is implemented in `main.py`. It scrapes job postings from LinkedIn based on the search queries and filters specified in the `config.json` file. The scraper removes duplicate and irrelevant job postings based on the specified keywords and stores the remaining job postings in a SQLite database.
+| Key | Meaning |
+|---|---|
+| `db_path` | SQLite file path. Default `./data/my_database.db`. |
+| `jobs_tablename` | Table for kept jobs. Default `jobs`. The web app expects `jobs`. |
+| `filtered_jobs_tablename` | Table for jobs your filters rejected, so they're never re-fetched. Default `filtered_jobs`. |
+| `resume_path` | Full path to your resume **PDF**, used by the AI resume/cover-letter buttons. A single-column layout without images parses best. |
+| `OpenAI_API_KEY`, `OpenAI_Model`, `OpenAI_Base_URL`, `Vision_Model` | Better set in `.env` (see above). |
+| `email_alerts.imap_host` | IMAP server. Default `imap.gmail.com`. |
+| `email_alerts.folder` | Mailbox folder to scan. Default `INBOX`. |
+| `email_alerts.days` | How many days back to look on each run. Default `2`. |
+| `email_alerts.senders` | Sender addresses or fragments that identify alert emails, e.g. `"stepstone"`, `"jobalerts-noreply@linkedin.com"`. |
 
-To run the scraper, execute the following command:
+---
+
+## Getting jobs in
+
+There are five ways to add jobs. They all write to the same `jobs` table and all skip jobs that are already saved.
+
+### 1. Scraper (`main.py`)
+
+```bash
+python main.py                  # uses config.json
+python main.py other_config.json  # uses a different config
+```
+
+What one run does:
+
+1. Fetches from every enabled source.
+2. Removes duplicates (same title + company).
+3. Applies title / company / language filters.
+4. Drops jobs already in `jobs` or `filtered_jobs` (same URL, or same title + company + date).
+5. Drops jobs older than `days_to_scrape`; fetches missing descriptions (LinkedIn only).
+6. Applies `desc_words`. Survivors go to `jobs`; rejected ones go to `filtered_jobs`.
+7. Also writes `linkedin_jobs.csv` and `linkedin_jobs_filtered.csv` for that run.
+
+### 2. Hand-picked links (`add_jobs.py`)
+
+For specific jobs you found yourself. Works with LinkedIn job links, XING, and any page that includes schema.org `JobPosting` data (Personio, Join, Greenhouse, Lever, and most company career sites).
+
+```bash
+python add_jobs.py https://www.linkedin.com/jobs/view/1234567890/ https://jobs.example.com/abc
+python add_jobs.py < links.txt    # one URL per line
+```
+
+Your filters are **not** applied here, since you chose these jobs. Tracking parameters (`utm_*`, `trk`, ...) are stripped so the same job always has the same URL.
+
+### 3. Add job page (link / screenshot / pasted text)
+
+Open **Add job** in the web app (`/add_job`). Give it any of:
+
+- **A link.** Read the same way as `add_jobs.py`. Many boards (StepStone, Indeed, Glassdoor) block this; if so, the page asks you for a screenshot or text.
+- **A screenshot** of the posting. A vision model reads it (`VISION_MODEL`, or `OPENAI_MODEL` if not set).
+- **Pasted text.** Select all on the job page, copy, paste. The model pulls out title, company, location, and description.
+
+If you give a link *and* a screenshot or text, the screenshot/text is read and the link is stored as the job's URL. Tick **"I've applied"** to mark it applied right away.
+
+### 4. "Save to tracker" bookmarklet
+
+The easiest way to save jobs from sites that block scrapers. Your browser has already loaded the page, so nothing gets blocked.
+
+1. Open the **Add job** page.
+2. **Drag** the **Save to tracker** link to your bookmarks bar. (Clicking it does nothing on purpose.)
+3. On any job posting, click the bookmark. A new tab confirms the save, with an **"I've applied to this"** button.
+
+It uses the page's structured `JobPosting` data when there is any, and otherwise has the AI model read the visible text. The web app must be running at the address it was dragged from.
+
+### 5. Job-alert emails (`email_alerts.py`)
+
+Many boards that block scraping will still email you new jobs for a saved search. This script reads those alert emails from Gmail over IMAP, has the AI model list the jobs in each, and saves them.
+
+```bash
+python email_alerts.py              # last `email_alerts.days` days (default 2)
+python email_alerts.py --days 14    # look further back, e.g. the first time
+python email_alerts.py --dry-run    # show what would be saved, save nothing
+```
+
+- Setup: enable IMAP in Gmail, create an **app password**, and put it in `.env`.
+- The inbox is opened **read-only**, so emails stay unread.
+- Each email is processed only once (tracked in the `processed_emails` table).
+- Alert emails have title, company, location, and link but no description. Where the site allows it, the full posting is fetched. Otherwise the job is saved without a description; open it later and use the bookmarklet to fill it in.
+
+---
+
+## Using the web app
+
+```bash
+python app.py     # http://127.0.0.1:5099
+```
+
+### Jobs (`/`)
+
+All non-hidden jobs, newest first, with a sort toggle. Click a job to see its full description. Per job you can:
+
+| Button | Effect |
+|---|---|
+| **Applied** | Toggles the applied flag and records today as the applied date |
+| **Interview** / **Rejected** | Toggle those flags (cards are coloured by status) |
+| **Hide** | Removes it from the list (still counted on Applications if you applied) |
+| **Delete** | Removes the row from the database |
+| **Resume** | AI rewrites your resume PDF for this job |
+| **Cover letter** | AI drafts a cover letter, then a second pass refines it |
+
+Every status button is a toggle, so a misclick can be undone. Generated resumes and cover letters are saved in the database with the job.
+
+### Applications (`/applications`)
+
+Every job you've applied to, interviewed for, or been rejected from, including hidden ones. Shows tally cards (Applied / Waiting / Interview / Rejected, plus totals scraped and hidden). Click a card to filter, filter by source, and change a job's outcome from the table. "Rejected" keeps the interview flag, so an interview that ended in rejection still shows that history.
+
+### Add job (`/add_job`)
+
+See [Add job page](#3-add-job-page-link--screenshot--pasted-text) and the [bookmarklet](#4-save-to-tracker-bookmarklet).
+
+---
+
+## Database
+
+One SQLite file (default `data/my_database.db`). Open it with any SQLite tool, e.g. [DB Browser for SQLite](https://sqlitebrowser.org/) or `sqlite3 data/my_database.db`.
+
+**`jobs`** (and `filtered_jobs`, same shape minus the AI columns):
+
+| Column | Notes |
+|---|---|
+| `id` | Primary key |
+| `title`, `company`, `location` | |
+| `date` | Posting date, `YYYY-MM-DD` |
+| `job_url` | Canonical link, tracking parameters removed |
+| `job_description` | Plain text |
+| `source` | `LinkedIn`, `RemoteOK`, `Arbeitnow`, `XING`, `Greenhouse`, `Lever`, `Personio`, `Join`, `Manual`, or the site's name |
+| `applied`, `interview`, `rejected`, `hidden` | `0` / `1` |
+| `applied_date` | Set when you mark it applied |
+| `date_loaded` | When it entered the database |
+| `resume`, `cover_letter` | AI output, if generated |
+
+New columns are added automatically: `db_schema.py` runs on every start of `main.py` and `app.py` and upgrades older databases in place (including backfilling `source` from the URL). **Back up the `.db` file** before experimenting; it's your whole application history.
+
+---
+
+## Running it on a schedule
+
+Example crontab (`crontab -e`): scrape every 2 hours in the daytime, read alert emails twice a day.
+
+```cron
+0 8-20/2 * * *  cd /path/to/LinkedIn_Scraper && ./venv/bin/python main.py         >> scrape.log 2>&1
+30 9,18  * * *  cd /path/to/LinkedIn_Scraper && ./venv/bin/python email_alerts.py >> email.log  2>&1
+```
+
+The `cd` matters: scripts look for `config.json` and `.env` in the current directory.
+
+---
+
+## Project layout
 
 ```
-python main.py
+.
+├── main.py               # Scraper: all sources, filtering, dedupe, DB writes
+├── app.py                # Flask web app (Jobs, Applications, Add job, AI endpoints)
+├── add_jobs.py           # CLI: save specific job links
+├── job_intake.py         # Shared intake logic: link / screenshot / text / bookmarklet -> job
+├── email_alerts.py       # CLI: save jobs from Gmail job-alert emails
+├── db_schema.py          # Adds missing columns, infers `source` from URLs
+├── config_example.json   # Template for config.json
+├── .env_example          # Template for .env
+├── requirements.txt
+├── templates/            # jobs.html, applications.html, add_job.html, capture_result.html, ...
+├── static/job_actions.js # Jobs page buttons, sorting, detail panel
+├── tests/test_proxy_connection.py  # Checks your proxy changes your IP
+├── screenshot/           # Images used in this README
+└── data/                 # SQLite database (git-ignored)
 ```
 
-#### Web Interface
+---
 
-The web interface is implemented using Flask in `app.py`. It provides a simple interface to view the job postings stored in the SQLite database. Users can mark job postings as applied, rejected, interview, or hidden, and the changes will be saved in the database.
+## Troubleshooting
 
-When the job is marked as "applied" it will be highlighted in light blue so that it's obvious at a glance which jobs are applied to. "Rejecetd" will mark the job in red, whereas "Interview" will mark the job in green. Upon clicking "Hide" the job will dissappear from the list. There's currently no functionality to reverse these actions (i.e. unhine, un-apply, etc). To reverse it you'd have to go to the database and change values in applied, hidden, interview, or rejected columns.
+| Problem | Fix |
+|---|---|
+| `no such table: jobs` when opening the app | Run `python main.py` once first. |
+| `FileNotFoundError: config.json` | `cp config_example.json config.json`, and run commands from the project folder. |
+| `OpenAI_API_KEY is empty` | Set `OPENAI_API_KEY` in `.env`. |
+| `openai` errors such as `ChatCompletion` not found | The code uses the legacy client. Install the pinned version: `pip install openai==0.28.1`. |
+| Screenshot intake fails or returns nonsense | Your model can't read images. Set `VISION_MODEL` to one that can (e.g. `openai/gpt-4o-mini`). |
+| A link "couldn't be read" | The site blocks automated access or builds the page with JavaScript. Use the bookmarklet, a screenshot, or pasted text. |
+| Scraper finds 0 jobs | Your filters are probably too strict. Loosen `title_include`, `desc_words`, `languages`, or `days_to_scrape`. |
+| LinkedIn returns empty pages / HTTP 429 | You're rate-limited. Use a proxy, lower `pages_to_scrape`/`rounds`, or rely on the other sources. |
+| Gmail login fails | Use an app password (needs 2-step verification), and make sure IMAP is enabled in Gmail settings. |
+| Resume/cover letter is poor | Use a single-column PDF without images, and a stronger model. |
 
-To run the web interface, execute the following command:
+---
 
-```
-python app.py
-```
+## Legal & ethics
 
-Then, open a web browser and navigate to `http://127.0.0.1:5000` to view the job postings.
+- **LinkedIn** prohibits scraping in its User Agreement. The LinkedIn source is **off by default**; enabling it is at your own risk and may get your IP or account restricted.
+- The other sources are public APIs (RemoteOK, Arbeitnow, Greenhouse, Lever) or pages allowed by the site's `robots.txt` (XING sitemap and job pages). Keep request rates low.
+- Check that sites' terms allow what you do, and use this for **personal job searching** only, not to republish listings.
+- AI-generated resumes and cover letters can be wrong. **Read and edit them** before sending; never claim experience you don't have.
 
-### Configuration
+---
 
-The `config.json` file contains the configuration options for the scraper and the web interface. Below is a description of each option:
+## Roadmap
 
-- `proxies`: The proxy settings for the requests library. Set the `http` and `https` keys with the appropriate proxy URLs.
-- `headers`: The headers to be sent with the requests. Set the `User-Agent` key with a valid user agent string. If you don't know your user agen, google "my user agent" and it will show it.
-- `OpenAI_API_KEY`: Your OpenAI API key. You can get it from your OpenAI dashboard.
-- `OpenAI_Model`: The name of the OpenAI model to use for cover letter and resume generation. GPT-4 family of models produces best results, but also the most expensive one.
-- `OpenAI_Base_URL`: Optional. Leave empty to use OpenAI's own API. Set to the base URL of any OpenAI-compatible provider (e.g. `https://openrouter.ai/api/v1` for OpenRouter) to route requests there instead — use that provider's API key in `OpenAI_API_KEY` and one of its model names in `OpenAI_Model`.
-- `resume_path`: Local path to your resume in PDF format (only PDF is supported at this time). For best results it's advised that your PDF resume is formatted in a way that's easy for the AI to parse. Use a single column format, avoid images. You may get unpredictable results if it's in a two-column format.
-- `search_queries`: An array of search query objects, each containing the following keys:
-  - `keywords`: The keywords to search for in the job title.
-  - `location`: The location to search for jobs.
-  - `f_WT`: The job type filter. Values are as follows:
-        -  0 - onsite
-        -  1 - hybrid
-        -  2 - remote
-        -  empty (no value) - any one of the above.
-- `desc_words`: An array of keywords to filter out job postings based on their description.
-- `title_include`: An array of keywords to filter job postings based on their title. Keep *only* jobs that have at least one of the words from 'title_words' in its title. Leave empty if you don't want to filter by title.
-- `title_exclude`: An array of keywords to filter job postings based on their title. Discard jobs that have ANY of the word from 'title_words' in its title. Leave empty if you don't want to filter by title.
-- `company_exclude`: An array of keywords to filter job postings based on the company name. Discard jobs come from a certain company because life is too short to work for assholes.
-- `languages`: Script will auto-detect the language from the description. If the language is not in this list, the job will be discarded. Leave empty if you don't want to filter by language. Use "en" for English, "de" for German, "fr" for French, "es" for Spanish, etc. See documentation for langdetect for more details.
-- `timespan`: The time range for the job postings. "r604800" for the past week, "r84600" for the last 24 hours. Basically "r" plus 60 * 60 * 24 * <number of days>.
-- `jobs_tablename`: The name of the table in the SQLite database where the job postings will be stored.
-- `filtered_jobs_tablename`: The name of the table in the SQLite database where the filtered job postings will be stored.
-- `db_path`: The path to the SQLite database file.
-- `pages_to_scrape`: The number of pages to scrape for each search query.
-- `rounds`: The number of times to run the scraper. LinkedIn doesn't always show the same results for the same search query, so running the scraper multiple times will increase the number of job postings scraped. I set up a cron job that runs every hour during the day.
-- `days_toscrape`: The number of days to scrape. The scraper will ignore job postings older than this number of days.
+- [ ] Configure searches and run the scraper from the web UI
+- [ ] Sort by date added to the database (some postings show up days after they were posted)
+- [ ] Notes and interview dates per application
+- [ ] Export applications to CSV from the UI
 
-### What remains to be done
+Contributions welcome. For bigger changes, open an issue first to discuss.
 
-- [ ] Add functionality to unhide and un-apply jobs.
-- [ ] Add functionality to sort jobs by date added to the databse. Current sorting is by date posted on LinkedIn. Some jobs (~1-5%) are not being picked up by the search (and as such this scraper) until days after they are posted. This is a known issue with LinkedIn and there's nothing I can do about it, however sorting jobs by dated added to the database will make it easier to find those jobs.
-- [ ] Add front end functionality to configure search, and execute that search from UI. Currently configuration is done in json file and search is executed from command line.
+---
 
+## License
 
-### Contributing
-
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
-
-### License
-
-This project is licensed under the MIT License.X
-Write README.md file for this project. Make it detailed as possible.
-X
+MIT
