@@ -85,8 +85,8 @@ Job boards show you the same postings again and again, mix in sponsored and irre
 
 ```bash
 # 1. Get the code and create a virtual environment
-git clone <this-repo-url>
-cd LinkedIn_Scraper
+git clone https://github.com/nidhicj/job-scraper-tracker.git
+cd job-scraper-tracker
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
